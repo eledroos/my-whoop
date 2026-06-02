@@ -1,6 +1,6 @@
 name: OpenWhoop
 options:
-  bundleIdPrefix: com.openwhoop
+  bundleIdPrefix: com.nasser.openwhoop
   deploymentTarget:
     iOS: "16.0"
   createIntermediateGroups: true
@@ -32,6 +32,11 @@ targets:
         WHOOP_BASE_URL: $(WHOOP_BASE_URL)
         WHOOP_API_KEY: $(WHOOP_API_KEY)
         WHOOP_DEVICE_ID: $(WHOOP_DEVICE_ID)
+        NSLocalNetworkUsageDescription: >-
+          OpenWhoop syncs your decoded WHOOP data to your own self-hosted server
+          on your local network.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
     dependencies:
       - package: WhoopProtocol
       - package: WhoopStore

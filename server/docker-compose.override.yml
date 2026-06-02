@@ -1,0 +1,17 @@
+# Local override (not upstream). Keeps the Postgres data dir and raw archive in
+# Docker *named volumes* instead of macOS host bind mounts. Running Postgres with
+# its data dir on a macOS<->VM mount (Colima/Docker Desktop) is fragile (fsync /
+# permission issues); named volumes live inside the Linux VM and are reliable.
+# Data persists across `docker compose down`/`up` (volumes are only removed by
+# `docker compose down -v`).
+services:
+  whoop-db:
+    volumes:
+      - whoop_db_data:/var/lib/postgresql/data
+  whoop-ingest:
+    volumes:
+      - whoop_raw_data:/data/raw
+
+volumes:
+  whoop_db_data:
+  whoop_raw_data:
