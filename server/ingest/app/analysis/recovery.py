@@ -35,9 +35,11 @@ recovery.py — Resting HR during sleep + an HRV-driven recovery score (0–100)
   night"), scale 0.12 (empirical for a plausible ±2σ band).
 
   Cold-start: if the HRV baseline is not yet usable (fewer than MIN_NIGHTS_SEED=4
-  valid nights), the function returns ``None``.  Callers may substitute
-  RECOVERY_POPULATION_MEAN (58.0) as a fallback, but should flag it clearly.
-  Returning ``None`` is more honest than returning a fake score.
+  valid nights) OR is absent entirely (e.g. zero prior nights), the function
+  returns ``None`` — the HRV term is the dominant driver, so without it the only
+  remaining signal is sleep efficiency, which is not a recovery score.  Callers may
+  substitute RECOVERY_POPULATION_MEAN (58.0) as a fallback, but should flag it
+  clearly.  Returning ``None`` is more honest than returning a fake score.
 
 ------------------------------------------------------------------------------
 Input shapes
@@ -270,17 +272,27 @@ def recovery_score(
     b_rhr_mean, b_rhr_spread = _extract_baseline_mean_spread(baselines, "resting_hr")
     b_resp_mean, b_resp_spread = _extract_baseline_mean_spread(baselines, "resp")
 
-    # ── Cold-start gate ───────────────────────────────────────────────────────
-    # Check if the HRV baseline (dominant driver) comes from a BaselineState.
-    # If it does and it's not yet trusted, return None (too few nights of data).
+    # ── Cold-start / no-baseline gate ─────────────────────────────────────────
+    # Recovery is HRV-dominant (W_HRV=0.60): without a usable personal HRV baseline
+    # there is no recovery score — only the minor terms (sleep efficiency, etc.).
+    # Returning None is more honest than emitting a number driven by those alone.
+    # Withhold the score unless the HRV baseline is usable:
+    #   • a BaselineState that is .usable  (≥ MIN_NIGHTS_SEED valid nights), or
+    #   • a legacy plain-float / (mean, spread) baseline (caller-supplied → trusted).
+    # A MISSING HRV baseline (None / absent key — e.g. zero prior nights) returns
+    # None too. Before this guard a zero-history night with sleep_perf set fell
+    # through to a sleep-efficiency-ONLY score (the first-night "looked like 84%" bug).
     raw_hrv_val: Any
     if isinstance(baselines, Mapping):
         raw_hrv_val = baselines.get("hrv")
     else:
         raw_hrv_val = getattr(baselines, "hrv", None)
 
-    if isinstance(raw_hrv_val, BaselineState) and not raw_hrv_val.usable:
-        return None  # cold-start: HRV baseline not yet usable (< MIN_NIGHTS_SEED valid nights)
+    if isinstance(raw_hrv_val, BaselineState):
+        if not raw_hrv_val.usable:
+            return None  # cold-start: HRV baseline not yet usable (< MIN_NIGHTS_SEED nights)
+    elif b_hrv_mean is None or b_hrv_spread is None:
+        return None  # no usable HRV baseline at all (e.g. zero prior nights)
 
     # ── Compute per-metric z-scores (recovery-favorable direction) ────────────
     # z_hrv:  higher HRV  → more positive (good)
