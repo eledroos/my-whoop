@@ -263,6 +263,43 @@ class TestRecoveryScoreColdStart:
         assert r is None
 
 
+class TestRecoveryNoHrvBaselineGate:
+    """Regression: recovery must be withheld (None) when there is NO usable HRV
+    baseline, EVEN IF a minor term (sleep efficiency) is present.
+
+    Bug (2026-06-03): the cold-start gate only fired for a *non-usable BaselineState*,
+    not for an ABSENT HRV baseline (None / missing key). With zero prior nights,
+    daily._build_baselines returns {"hrv": None, ...} and daily.compute_day passes
+    sleep_perf=efficiency — so recovery fell through to a sleep-efficiency-ONLY
+    logistic and produced a misleading score (the very first night "looked like" 84%,
+    computed purely from ~95% sleep efficiency, not from any physiological baseline).
+    Honest behavior: None until a usable HRV baseline (the dominant W=0.60 driver) exists.
+    """
+
+    def test_empty_baselines_with_sleep_perf_returns_none(self):
+        # Reproduces the daily.py first-night call shape: no baseline, sleep_perf set.
+        assert recovery_score(55.0, 58.0, 14.0, {}, sleep_perf=0.95) is None
+
+    def test_none_baselines_with_sleep_perf_returns_none(self):
+        assert recovery_score(55.0, 58.0, 14.0, None, sleep_perf=0.95) is None
+
+    def test_hrv_none_in_dict_with_sleep_perf_returns_none(self):
+        # Exactly what _build_baselines returns for zero prior nights.
+        baselines = {"hrv": None, "resting_hr": None, "resp": None}
+        assert recovery_score(55.0, 58.0, 14.0, baselines, sleep_perf=0.95) is None
+
+    def test_missing_hrv_but_rhr_present_with_sleep_perf_returns_none(self):
+        # HRV is the dominant required driver; without it there is no recovery score,
+        # even when a usable RHR baseline + sleep efficiency are available.
+        baselines = {"resting_hr": BaselineState(58.0, 2.0, 20, 0, "trusted")}
+        assert recovery_score(55.0, 58.0, 14.0, baselines, sleep_perf=0.95) is None
+
+    def test_usable_hrv_with_sleep_perf_still_scores(self):
+        # Guard: the fix must NOT suppress the normal (usable-baseline) case.
+        r = recovery_score(55.0, 58.0, 14.0, _trusted_baselines(), sleep_perf=0.95)
+        assert r is not None and 0.0 <= r <= 100.0
+
+
 class TestRecoveryScoreLegacyCompat:
     """Verify backward-compat with old plain-float dict baselines."""
 
