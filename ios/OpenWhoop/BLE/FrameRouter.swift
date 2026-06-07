@@ -36,7 +36,7 @@ public final class FrameRouter {
 
         case "COMMAND_RESPONSE":
             if let pct = parsed.parsed["battery_pct"]?.doubleValue {
-                state.setBattery(pct)
+                state.setBattery(pct, source: .strap)
             }
 
         case "EVENT":

@@ -813,7 +813,7 @@ extension BLEManager: CBPeripheralDelegate {
         case BLEManager.heartRateChar:
             parseStandardHR(bytes)
         case BLEManager.batteryChar:
-            if let pct = bytes.first { state.setBattery(Double(pct)) } // 0x2A19 = percent
+            if let pct = bytes.first { state.setBattery(Double(pct), source: .bleStandard) } // 0x2A19 = percent (display only; unreliable, never drives alerts)
         case BLEManager.dataNotifyChar,
              BLEManager.cmdNotifyChar,
              BLEManager.eventNotifyChar:

@@ -31,10 +31,25 @@ public struct BatteryAlertConfig: Equatable {
 
 /// One alert that fired because the battery crossed its threshold on the way down.
 public struct BatteryAlert: Equatable {
+    /// The configured threshold this alert is for (50 / 20 by default).
     public let threshold: Int
+    /// The actual battery reading (%) that tripped it. Reported in the notification so the text
+    /// shows the real value instead of the threshold label.
+    public let reading: Double
+
+    public init(threshold: Int, reading: Double) {
+        self.threshold = threshold
+        self.reading = reading
+    }
 }
 
 public enum BatteryAlertEvaluator {
+    /// Largest plausible single-step battery drop, in percentage points. Real discharge is
+    /// gradual; a bigger one-shot drop (e.g. 58 → 0) is a stale/garbage sample, so the monitor
+    /// ignores it rather than firing a false alert. Sized so the existing "big drop crosses both
+    /// thresholds" case (55 → 15 = 40 points) stays valid.
+    public static let maxPlausibleDrop: Double = 40
+
     /// Decide which enabled alerts should fire for a transition from `previous` to `current` %.
     ///
     /// Edge-triggered: an alert fires only when the battery crosses DOWN through its threshold —
@@ -52,10 +67,10 @@ public enum BatteryAlertEvaluator {
         }
         var fired: [BatteryAlert] = []
         if config.warnEnabled, crossed(config.warnThreshold) {
-            fired.append(BatteryAlert(threshold: config.warnThreshold))
+            fired.append(BatteryAlert(threshold: config.warnThreshold, reading: current))
         }
         if config.lowEnabled, crossed(config.lowThreshold) {
-            fired.append(BatteryAlert(threshold: config.lowThreshold))
+            fired.append(BatteryAlert(threshold: config.lowThreshold, reading: current))
         }
         return fired
     }
