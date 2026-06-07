@@ -26,9 +26,16 @@ public final class BatteryAlertMonitor {
                 ?? BatteryAlertKeys.defaultLowThreshold)
     }
 
-    /// Feed one battery reading (0–100). Fires any alerts crossed since the last reading.
+    /// Feed one battery reading (0–100) from the trusted source. Fires any alerts crossed since
+    /// the last reading.
+    ///
+    /// Sanity gate: ignore out-of-range values and implausibly large single-step drops (real
+    /// discharge is gradual; a 58 → 0 cliff is a stale/garbage sample). Gated readings are NOT
+    /// persisted, so the baseline stays at the last good value and a genuine later drop still alerts.
     public func handle(battery current: Double) {
+        guard current >= 0, current <= 100 else { return }
         let previous = defaults.object(forKey: BatteryAlertKeys.lastReading) as? Double
+        if let previous, previous - current > BatteryAlertEvaluator.maxPlausibleDrop { return }
         defaults.set(current, forKey: BatteryAlertKeys.lastReading)
         for alert in BatteryAlertEvaluator.evaluate(previous: previous, current: current, config: config) {
             notify(alert)
@@ -42,8 +49,9 @@ public final class BatteryAlertMonitor {
 
     private static func postLocalNotification(_ alert: BatteryAlert) {
         let content = UNMutableNotificationContent()
-        content.title = "WHOOP battery at \(alert.threshold)%"
-        content.body = "Your WHOOP has dropped to \(alert.threshold)%."
+        let pct = Int(alert.reading.rounded())
+        content.title = "WHOOP battery at \(pct)%"
+        content.body = "Dropped below your \(alert.threshold)% alert."
         content.sound = .default
         // nil trigger = deliver now. Stable id per threshold so a repeat replaces rather than stacks.
         let request = UNNotificationRequest(identifier: "battery-alert-\(alert.threshold)",

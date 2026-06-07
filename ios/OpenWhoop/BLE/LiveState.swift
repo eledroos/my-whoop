@@ -1,6 +1,15 @@
 import Foundation
 import Combine
 
+/// Where a battery reading came from. Only `.strap` (the strap's decoded battery frame) is trusted
+/// to drive low-battery alerts; `.bleStandard` (the standard 0x2A19 GATT characteristic) is
+/// display-only, because on the WHOOP it intermittently reports stale/garbage low values that were
+/// firing false "battery low" notifications.
+public enum BatterySource {
+    case strap
+    case bleStandard
+}
+
 /// Observable snapshot of the live connection + biometric state, driven by FrameRouter
 /// (from decoded frames) and BLEManager (from CoreBluetooth callbacks).
 /// `@MainActor` so SwiftUI views observe it safely; mutators are called on the main queue.
@@ -30,11 +39,13 @@ public final class LiveState: ObservableObject {
 
     public init() {}
 
-    /// Single funnel for battery readings — updates the published value AND notifies the hook,
-    /// so both write sites (FrameRouter, BLEManager) drive the alert monitor identically.
-    public func setBattery(_ pct: Double) {
+    /// Single funnel for battery readings. Updates the published value for display from any source,
+    /// but only the trusted strap-frame source drives the alert hook — the standard 0x2A19
+    /// characteristic is a notify stream that intermittently reports stale/garbage low values,
+    /// which were tripping false "battery low" notifications.
+    public func setBattery(_ pct: Double, source: BatterySource = .strap) {
         batteryPct = pct
-        onBatteryUpdate?(pct)
+        if source == .strap { onBatteryUpdate?(pct) }
     }
 
     public func append(log line: String) {
