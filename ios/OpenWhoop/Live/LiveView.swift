@@ -23,6 +23,7 @@ public struct LiveView: View {
             .task {
                 while !Task.isCancelled {
                     model.refreshStorage()
+                    model.refreshDataCoverage()
                     try? await Task.sleep(for: .seconds(5))
                 }
             }
@@ -160,6 +161,9 @@ private struct LiveContentView: View {
                 // Sync-freshness row
                 syncFreshnessRow
 
+                // Data-coverage row: the timestamp our data is complete THROUGH + caught-up/behind
+                dataThroughRow
+
                 // Storage summary
                 Text(model.storageSummary)
                     .font(.system(size: 11, design: .monospaced))
@@ -207,6 +211,41 @@ private struct LiveContentView: View {
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(color)
         }
+    }
+
+    /// "DATA THROUGH <local date-time> · ✓ caught up / ~Nh behind" — what your stored data actually
+    /// reaches, distinct from the last-sync-attempt line above it.
+    private var dataThroughRow: some View {
+        let coverage = SyncCoverage.state(dataThroughTs: state.dataThroughTs,
+                                          strapNewestTs: state.strapNewestTs,
+                                          now: Date().timeIntervalSince1970)
+        let (badge, color): (String, Color) = {
+            switch coverage {
+            case .noData:           return ("no data yet", WH.Color.textSecondary)
+            case .caughtUp:         return ("✓ caught up", WH.Color.recoveryGreen)
+            case .behind(let secs): return (SyncCoverage.behindLabel(seconds: secs), WH.Color.recoveryYellow)
+            }
+        }()
+        return HStack(spacing: WH.Spacing.xs) {
+            Text("DATA THROUGH")
+                .font(WH.Font.cardTitle)
+                .foregroundStyle(WH.Color.textSecondary)
+                .tracking(1.2)
+            Text(state.dataThroughTs.map(Self.formatDataThrough) ?? "—")
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(WH.Color.textPrimary)
+            Spacer()
+            Text(badge)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(color)
+        }
+    }
+
+    /// Format a data-frontier timestamp in the device's local time zone, e.g. "Sun Jun 15 · 9:08 PM".
+    private static func formatDataThrough(_ ts: TimeInterval) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "EEE MMM d · h:mm a"
+        return f.string(from: Date(timeIntervalSince1970: ts))
     }
 
     private func statusChip(_ label: String, _ value: String, _ accent: Color) -> some View {
@@ -454,18 +493,33 @@ private struct LiveContentView: View {
             sectionHeader("Log")
                 .padding(.horizontal, WH.Spacing.xs)
 
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(Array(state.log.suffix(30).enumerated()), id: \.offset) { _, line in
-                    Text(line)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(WH.Color.textSecondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            // Fixed-height box nested inside the page: it scrolls on its own and auto-follows the
+            // newest line, so the page no longer grows as the log fills. Scroll up inside the box to
+            // review older output.
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(state.log.enumerated()), id: \.offset) { idx, line in
+                            Text(line)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(WH.Color.textSecondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .id(idx)
+                        }
+                    }
+                    .padding(WH.Spacing.sm)
+                }
+                .frame(height: 240)
+                .background(WH.Color.surface2,
+                            in: RoundedRectangle(cornerRadius: WH.Radius.card, style: .continuous))
+                .onChange(of: state.logSeq) { _ in
+                    guard let last = state.log.indices.last else { return }
+                    withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(last, anchor: .bottom) }
+                }
+                .onAppear {
+                    if let last = state.log.indices.last { proxy.scrollTo(last, anchor: .bottom) }
                 }
             }
-            .padding(WH.Spacing.sm)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(WH.Color.surface2,
-                        in: RoundedRectangle(cornerRadius: WH.Radius.card, style: .continuous))
         }
     }
 }

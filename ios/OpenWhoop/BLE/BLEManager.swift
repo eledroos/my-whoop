@@ -376,6 +376,9 @@ public final class BLEManager: NSObject, ObservableObject {
             let frontier = await collector?.latestHRSampleTs()
             let front: Int? = frontier ?? nil
             let now = Date().timeIntervalSince1970
+            // Surface the data-coverage values for the Device view's "Data through" readout.
+            state.dataThroughTs = front.map(TimeInterval.init)
+            state.strapNewestTs = strapNewest.map(TimeInterval.init)
             let stuck = stuckDetector.observe(strapNewestTs: strapNewest,
                                               ourFrontierTs: front,
                                               now: now)
@@ -385,6 +388,18 @@ public final class BLEManager: NSObject, ObservableObject {
                 send(.exitHighFreqSync, payload: [0x00])
                 send(.setClock, payload: BLEManager.setClockPayload())
             }
+        }
+    }
+
+    /// Recompute + publish the data-coverage values (frontier + strap newest) for the Device view's
+    /// "Data through" readout. Cheap; called on the view's periodic poll so the readout is populated on
+    /// open and stays live even when idle (the frontier only advances during an offload).
+    func refreshDataCoverage() {
+        let strapNewest = strapNewestTs
+        Task { @MainActor in
+            let front = await collector?.latestHRSampleTs() ?? nil
+            state.dataThroughTs = front.map(TimeInterval.init)
+            state.strapNewestTs = strapNewest.map(TimeInterval.init)
         }
     }
 
