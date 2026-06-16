@@ -84,6 +84,9 @@ public final class LiveViewModel: ObservableObject {
     /// User tapped "Sync now" — force an offload regardless of the periodic floor.
     public func syncNow() { ble.requestSync(.manual) }
 
+    /// Refresh the "data through / caught up" coverage readout (polled with storage by LiveView).
+    public func refreshDataCoverage() { ble.refreshDataCoverage() }
+
     /// Refresh the storage summary line from the store (polled every few seconds by LiveView).
     public func refreshStorage() {
         Task { @MainActor in

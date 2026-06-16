@@ -33,6 +33,18 @@ public final class LiveState: ObservableObject {
     /// came — i.e. caught up). Drives the sync tile + the staleness nudge.
     @Published public var lastSyncedAt: TimeInterval?
 
+    /// Newest stored sample (the data frontier) — what your data is complete THROUGH. nil = none yet.
+    /// Distinct from `lastSyncedAt` (when we last *attempted* a sync); this is the data's actual reach.
+    @Published public var dataThroughTs: TimeInterval?
+
+    /// Newest record the strap reports having (from GET_DATA_RANGE). With `dataThroughTs` this drives
+    /// the caught-up / behind badge.
+    @Published public var strapNewestTs: TimeInterval?
+
+    /// Monotonic counter bumped on every `append(log:)`. Lets the log view auto-scroll on each new
+    /// line even once `log` is capped at 200 (where `log.count` stops changing).
+    @Published public var logSeq: Int = 0
+
     /// Optional hook invoked on every battery update (wired by LiveViewModel to the alert monitor).
     /// Kept as a closure so LiveState stays a plain observable snapshot with no alert dependency.
     public var onBatteryUpdate: ((Double) -> Void)?
@@ -51,5 +63,6 @@ public final class LiveState: ObservableObject {
     public func append(log line: String) {
         log.append(line)
         if log.count > 200 { log.removeFirst(log.count - 200) }
+        logSeq &+= 1
     }
 }
