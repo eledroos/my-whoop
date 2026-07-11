@@ -1,0 +1,152 @@
+All paths are confirmed: `hrv.py`, `baselines.py`, `recovery.py`, `exercise.py`, `activity.py`, `calories.py`, and `units.py` all exist at the referenced location. Now I'll write the addendum.
+
+# Deep Literature Addendum to the Analysis Audit
+
+**Date:** 2026-06-02
+**Scope:** Five metrics — HRV, Recovery Baselines, Exercise/Activity Detection, Calories, and Derived Signals (SpO2, Respiratory Rate, Skin Temperature) — whose literature coverage was thin in the original audit. Each section maps gold-standard evidence to the implementation, quantifies divergence and achievable accuracy with citations, and gives prioritized recommendations. All citations are carried verbatim from the underlying per-metric reviews; none have been invented.
+
+---
+
+## 1. Heart Rate Variability (RMSSD)
+
+**File:** `/Users/nasser/_dev/whoop-de-doo/my-whoop/server/ingest/app/analysis/hrv.py`
+
+### Gold standard / what the literature says
+RMSSD is the canonical short-window HRV index. The Task Force of the ESC/NASPE (1996) defined it as `sqrt(mean(diff(NN)^2))` and designated 5-minute recordings as the short-term standard ([Task Force, Circulation 1996](https://pubmed.ncbi.nlm.nih.gov/8598068/)). Shaffer & Ginsberg (2017) confirm RMSSD is the right choice for ultra-short windows: even a single 10-second segment yields a valid RMSSD (r=0.85–0.86 vs the 5-min standard; r=0.94 averaging three 10-sec ECGs), whereas SDNN needs ≥30 seconds ([Frontiers in Public Health 5:258](https://www.frontiersin.org/articles/10.3389/fpubh.2017.00258/full)). State-of-the-art artifact correction is the Kubios/Lipponen–Tarvainen (2019) time-varying-threshold method, validated on ECG at 96.96% sensitivity / 99.94% specificity for real ectopic beats and <2% HRV-parameter error ([J Med Eng Technol 43(3):173–181](https://pubmed.ncbi.nlm.nih.gov/31314618/)). Deep sleep (SWS) is the most reproducible state for nocturnal RMSSD ([Reproducibility is Parameter and Sleep Stage Dependent, Frontiers 2018](https://www.frontiersin.org/articles/10.3389/fphys.2017.01100/full)).
+
+### What the code does & where it diverges
+- **Faithful.** `rmssd_ms()` (lines 71–92) implements the Task Force formula exactly via `np.diff()`. The range filter [300–2000 ms] is physiologically sound (Task Force–consistent). Kubios correction is applied via neurokit2 (line 152). Segment pooling at >3 s gaps avoids fabricating boundary artifacts. Window length (≥5 min SWS, `SWS_MIN_DURATION_S=300`) is conservative and valid; the 20-beat minimum prevents trivial-sample RMSSD.
+- **Diverges.** (a) The data source is **Whoop PPG, not ECG**; Kubios was validated on ECG and is applied here to synthetic peaks reconstructed from PPG RR intervals at 1000 Hz — an untested transformation. (b) Artifacts are **deleted, not interpolated**, and the code does **not enforce an artifact-density threshold**. (c) The **last-SWS-primary** window strategy depends on Whoop sleep staging, which has only "moderate sensitivity." (d) **Linear recency weighting (1,2,…,n)** in the secondary tier has no literature basis. (e) **No Bland-Altman/LOA validation** against a reference is performed.
+
+### Reported accuracy / limits (with numbers + citations)
+- PPG systematically **underestimates RMSSD by ~3–4 ms** vs ECG (and SDNN by 7–12 ms, pNN50 by 1–3%) because the vasculature acts as a structural low-pass filter ([PRV is Not the Same as HRV, n=931, Frontiers 2025](https://www.frontiersin.org/articles/10.3389/fphys.2025.1630032/full)). PRV and HRV are interchangeable only in supine rest, not under stress/tilt/exercise ([Mejía-Mejía et al. 2020, Frontiers in Physiology 11:779](https://www.frontiersin.org/articles/10.3389/fphys.2020.00779/full)).
+- WHOOP 2.0 vs ECG during sleep: HR agreement excellent (ES ≤0.03), but **RMSSD(Ln) bias/LOA approached or exceeded the smallest worthwhile change** (with a 200 ms filter: bias 1.66±1.80%, LOA ±5.93%); WHOOP has "only moderate sensitivity" for sleep stage ([Sensors 2021, PMC8160717](https://pmc.ncbi.nlm.nih.gov/articles/PMC8160717/)).
+- RMSSD is fragile to artifacts: a **single artifact inflates RMSSD by +413% supine / +269% standing**; RMSSD is unreliable above ~0.9% artifact density ([Sensors 2022, PMC9157524](https://pmc.ncbi.nlm.nih.gov/articles/PMC9157524/)).
+- Whoop samples at **52 Hz**, which exceeds the ~50 Hz minimum for RMSSD without interpolation; SNR matters more than rate, and PPG beat timing is realistically ±3–5 ms (vs the code's implicit ±1 ms assumption).
+- A critical methodological caveat: most ultra-short validity studies use correlation alone, which cannot detect bias; only LOA analysis can ([Critical Review of Ultra-Short-Term HRV, Frontiers in Neuroscience 2020](https://www.frontiersin.org/journals/neuroscience/articles/10.3389/fnins.2020.594880/full); see also [Schäfer & Vagedes 2013](https://pubmed.ncbi.nlm.nih.gov/23138017/), [PLOS ONE 2015](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0138921), [interpolation/Hensley PMC6679245](https://pmc.ncbi.nlm.nih.gov/articles/PMC6679245/)).
+
+### Recommendations (prioritized)
+1. **Enforce an artifact-density gate**: reject windows where `n_artifacts / n_beats > 0.009` and surface `artifact_rate` in the output (closes the +413% fragility risk).
+2. **Validate against ECG with LOA** (Bland-Altman, not just r) on simultaneous Whoop+ECG sleep data; target LOA within ±10% (±6–8 ms for typical 65–80 ms nightly RMSSD).
+3. **Validate sleep-stage inputs** before window selection (non-overlapping intervals, total duration sanity); treat Whoop stages as estimates.
+4. **Reconsider window priority** toward whole-night or weighted-all-SWS as primary (more robust to staging error and circadian non-stationarity, per [Altini](https://medium.com/@altini_marco/what-you-need-to-know-about-heart-rate-variability-hrv-data-collected-during-the-night-eb3913ffdcf) and [Sleep Health 2022, PMC8923916](https://pmc.ncbi.nlm.nih.gov/articles/PMC8923916/)); or emit all three and let downstream choose.
+5. **Replace linear recency weighting** with uniform or exponential, or cite a basis; run a sensitivity analysis on the 3 s pooling gap.
+
+---
+
+## 2. Recovery Scoring & Personal Baselines
+
+**Files:** `/Users/nasser/_dev/whoop-de-doo/my-whoop/server/ingest/app/analysis/baselines.py`, `/Users/nasser/_dev/whoop-de-doo/my-whoop/server/ingest/app/analysis/recovery.py`
+
+### Gold standard / what the literature says
+The sports-science consensus favors **multi-day rolling averages** over single readings for HRV-based status: Plews et al. (2013) established the 7-day rolling average and CV-of-RMSSD as the standard, showing acute single readings fail to track training response in elite athletes ([Sports Medicine 43:773–781](https://link.springer.com/article/10.1007/s40279-013-0071-8)). Buchheit (2014) emphasizes individual baselines over population norms, the smallest-worthwhile-change framing, and warns that night recordings conflate sleep fragmentation with autonomic state ([Frontiers in Physiology 5:73](https://www.frontiersin.org/journals/physiology/articles/10.3389/fphys.2014.00073/full)). Bellenger et al. (2016) find overreaching has inconsistent direction on resting HRV and that no single index universally predicts overtraining ([Sports Medicine 46:1461–1480](https://link.springer.com/article/10.1007/s40279-016-0484-2)). Within-individual **z-scoring is endorsed** by both Buchheit and Plews.
+
+### What the code does & where it diverges
+- **Faithful / sound.** Winsorized 14-night-half-life EWMA center + 21-night EWMA-of-absolute-deviation spread (floored per metric), with hard outlier rejection (>5σ; HRV <5 or >250 ms) is a robust, defensible baseline. The z-score `z = (value − baseline) / (1.253 × spread)` is mathematically correct (1.253 = E|X−μ|/σ conversion) and scale-invariant — the methodologically correct, individual-focused approach. The 14-night half-life aligns with Oura's published 14-day HRV Balance window. HRV weight W=0.60 matches WHOOP's published claim and is honestly flagged "APPROXIMATE."
+- **Diverges.** (a) Recovery is driven by a **single-night** z-score, against literature preference for 7–10 day smoothing for chronic status. (b) HRV is measured **nocturnally**, confounding sleep quality (Buchheit's warning); Altini argues morning seated HRV is superior. (c) The **cold-start gate seeds at 4 nights** (`MIN_NIGHTS_SEED=4`), but literature shows baselines stabilize at 14–21 days. (d) The composite has **no validation against performance outcomes**. (e) **No CV-of-RMSSD trend** is tracked (Plews' early-overreaching flag).
+
+### Reported accuracy / limits (with numbers + citations)
+- **Individual metrics are well-validated; composites are not.** Nocturnal RMSSD vs ECG: Oura Gen4 CCC=0.99, Gen3 0.97, WHOOP 4.0 0.94, Garmin 0.87; RHR CCC≈0.98; but 4-stage sleep staging only ~60% (WHOOP) / 61% (Oura) ([Validation, Physiological Reports 2025](https://physoc.onlinelibrary.wiley.com/doi/10.14814/phy2.70527); [WHOOP medRxiv 2024](https://www.medrxiv.org/content/10.1101/2024.01.04.24300784.full)).
+- **Composite recovery/readiness scores lack independent peer-reviewed validation** — no published correlation with time trials/power/CMJ, no published MAE ([Biosource 2024](https://www.biosourcesoftware.com/post/5-second-science-wearable-composite-health-scores-require-validation); JMIR/medRxiv 2024 above). NCAA swimmers: only weak WHOOP-metric/stress correlations (~r=-0.46).
+- Single-night RMSSD reproducibility: **ICC 0.75–0.98, day-to-day CV ~5–10%** — a normal fluctuation can cross z=1.0 and flip a recovery band. Terra (n≈100k records, 2025) found only ~4.4% of nights exceed z=2, so most nights sit in a narrow z∈[-1,+1] band — single-night variability is large relative to the logistic's sensitivity ([Terra Research 2025](https://tryterra.co/research/descriptive-hrv-using-z-scores)). Counterpoint: Grosicki et al. (2020) found single-night HRV correlated *better* (r=0.37–0.52) with acute exercise recovery than 3–4 day averages — context (acute vs chronic) matters ([Scientific Reports 10:12869](https://www.nature.com/articles/s41598-020-71747-8)). See also [Esco & Flatt 2014](https://pmc.ncbi.nlm.nih.gov/articles/PMC5554345/), [Kubios readiness](https://www.kubios.com/blog/hrv-readiness-score/), [WHOOP Recovery 101](https://www.whoop.com/us/en/thelocker/how-does-whoop-recovery-work-101/), [Oura HRV Balance](https://ouraring.com/blog/hrv-balance/), [Elite HRV baseline](https://help.elitehrv.com/article/74-how-the-hrv-baseline-works), [Altini timing](https://medium.com/@altini_marco/thoughts-on-heart-rate-variability-hrv-measurement-timing-morning-or-night-b92bd5495bc8), [Altini readiness](https://medium.com/@altini_marco/on-heart-rate-variability-hrv-and-readiness-394a499ed05b).
+
+### Recommendations (prioritized)
+1. **Add a 7-day smoothed HRV alongside the single-night z-score** (e.g. weight smoothed ~0.70 / single-night ~0.30) to cut false band flips; documents the responsive-vs-reliable trade-off (Plews/Buchheit).
+2. **Introduce a 3-tier confidence status**: `collecting` (0–4 nights, return None), `provisional` (5–13, flag high uncertainty), `trusted` (≥14). Aligns the gate with the 14–21-day stabilization literature.
+3. **Flag the sleep-quality confound**: either measure morning HRV separately for recovery, or document the nocturnal caveat explicitly (Buchheit, Altini).
+4. **Document and sensitivity-test W_HRV=0.60** across {0.40…0.80} against any available outcome data; audit baseline window length (7/14/21/30) on the user's own history.
+5. **Add a 7-day rolling CV-of-RMSSD** as a secondary overreaching signal (Plews): stable-low vs volatile-low HRV carry different meaning.
+
+---
+
+## 3. Exercise / Activity Detection
+
+**Files:** `/Users/nasser/_dev/whoop-de-doo/my-whoop/server/ingest/app/analysis/exercise.py`, `/Users/nasser/_dev/whoop-de-doo/my-whoop/server/ingest/app/analysis/activity.py`
+
+### Gold standard / what the literature says
+The Karvonen HRR formula is the ACSM-endorsed personalized-intensity method, superior to %HRmax (a 10–20 bpm accuracy advantage), with 60% HRR the historical threshold for cardiovascular adaptation ([Karvonen et al. 1957](https://pubmed.ncbi.nlm.nih.gov/13470504/); [ACSM guidelines](https://www.straightforwardfitness.com/acsm-cardio-guidelines.html); [Karvonen explainer](https://www.targetheartratecalculator.org/blog/karvonen-formula-explained/); [BCMJ Karvonen profile](https://bcmj.org/articles/science-exercise-prescription-martti-karvonen-and-his-contributions)). ACSM/ESSA 2025 fixes moderate at 40–59% HRR, vigorous at 60–89% ([JSAMS 2025](https://www.jsams.org/article/S1440-2440(24)00559-0/fulltext)). Tanaka (HRmax=208−0.7×age) beats 220−age (3.4 vs 10–12 bpm error; [JACC 2001](https://www.jacc.org/doi/10.1016/S0735-1097(00)01054-8); [marathon-runner validation PMC5862813](https://pmc.ncbi.nlm.nih.gov/articles/PMC5862813/)). Accelerometer gold-standard metrics are ENMO and MAD ([movisens algorithms](https://docs.movisens.com/Algorithms/physical_activity_metrics/); [ENMO/MAD thresholds PLOS ONE](https://journals.plos.org/plosone/article?id=10.1371%2Fjournal.pone.0164045); [comparability PMC6890686](https://pmc.ncbi.nlm.nih.gov/articles/PMC6890686/)). Edwards TRIMP zones correlate with sRPE (r=0.86) but lack physiological validation of the zone limits ([sportRxiv](https://sportrxiv.org/index.php/server/preprint/view/791)).
+
+### What the code does & where it diverges
+- **Faithful / exceeds.** A **dual-gate** design (HR ≥ resting+15 bpm AND smoothed gravity-difference motion ≥0.20 g/s) over ≥5-min bouts, plus a post-hoc **≥50% of samples at zone-2+ (≥60% HRR)** intensity gate. The **HRmax cascade** (observed p99.5 → Tanaka → 220−age, with `hrmax_source` tracked) exceeds single-formula practice. The **10th-percentile resting HR** is robust (median RHR ~0.89 bpm error; [medRxiv 19008771](https://www.medrxiv.org/content/10.1101/19008771.full.pdf)). Dropout → intensity=∞ correctly avoids mistaking sensor loss for stillness. Uncertainty handling (empty `zone_pct` when HRmax invalid, strain=None below sample count) is transparent.
+- **Diverges.** (a) Motion metric is a **1 Hz inter-sample Δgravity magnitude with no high-pass filter** — an ENMO-derivative approximation that is **not criterion-validated** against calorimetry. (b) `MERGE_GAP_S=150` and `MIN_INTENSITY_Z2PLUS=0.50` are **empirically tuned to one user's 2026-05 data** (66–100% z2+ real vs ≤43% noise → 50% midpoint), not population-derived. (c) **No activity-type classification** (`kind=None`), deferred to a future raw-accel task. (d) 10 s rolling-mean smoothing introduces ~10 s onset latency (mitigated by a tolerance subtraction).
+
+### Reported accuracy / limits (with numbers + citations)
+- Wrist PPG HR: ±1–3 bpm at rest, **±5–10 bpm during vigorous activity** (motion artifact, "cross-over effect"); the 15 bpm margin + dual gate is robust to this ([wrist HR guidelines PMC7320189](https://pmc.ncbi.nlm.nih.gov/articles/PMC7320189/); [smartwatch CPET PMC12605283](https://pmc.ncbi.nlm.nih.gov/articles/PMC12605283/); [SpaMA artifact removal, 1.86 bpm PMC4732043](https://pmc.ncbi.nlm.nih.gov/articles/PMC4732043/)).
+- Wrist ENMO/MAD: **AUROC >0.95** sedentary-vs-light, but moderate-intensity classification only Kappa 0.45–0.58 and vigorous 30–88% accuracy ([youth cut-points PMC9108175](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9108175/)). The code's 0.20 g/s (≈200 mg) sits in the light-to-moderate band.
+- %HRR diverges from %VO₂R by **4.8–8.6 pp for 45-min bouts** (cardiovascular drift inflates long-bout zones; [PMC9048681](https://pmc.ncbi.nlm.nih.gov/articles/PMC9048681/)); ventilatory threshold falls outside the 40–59% HRR band in ~39% of very-low/high-fitness subjects ([PMC10524184](https://pmc.ncbi.nlm.nih.gov/articles/PMC10524184/)).
+- 1 Hz sampling is adequate for gross sedentary-vs-MVPA but loses fine actions and activity type ([sampling-frequency PMC12196717](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12196717/)). Bout-duration and stress-HR context: [sedentary bouts PMC4319840](https://pmc.ncbi.nlm.nih.gov/articles/PMC4319840/); [stress HRV PMC7642880](https://pmc.ncbi.nlm.nih.gov/articles/PMC7642880/); [WHOOP stress/HRV/RHR](https://www.whoop.com/us/en/thelocker/stress-hrv-resting-heart-rate/); gravity separation [PMC3634007](https://pmc.ncbi.nlm.nih.gov/articles/PMC3634007/); ActiGraph counts [PMC9279376](https://pmc.ncbi.nlm.nih.gov/articles/PMC9279376/), [Nature s41598-022-16003-x](https://www.nature.com/articles/s41598-022-16003-x).
+
+### Recommendations (prioritized)
+1. **Criterion-validate the 0.20 g/s motion threshold** against indirect calorimetry/VO₂ on 10–20 users to map it to METs/%VO₂R.
+2. **Generalize `MERGE_GAP_S` and `MIN_INTENSITY_Z2PLUS`** across 30–50 diverse users (currently overfit to one user's soccer data).
+3. **Add a 0.5–1.0 Hz high-pass filter** (or HFEN) to the gravity stream to decouple slow wrist-orientation drift from motion.
+4. **Document the HRR limitation for >30 min bouts** (~5–8 pp inflation) and, longer-term, add raw-accel activity-type classification.
+
+---
+
+## 4. Calorie / Energy-Expenditure Estimation
+
+**File:** `/Users/nasser/_dev/whoop-de-doo/my-whoop/server/ingest/app/analysis/calories.py`
+
+### Gold standard / what the literature says
+Indirect calorimetry (lab) and doubly labeled water (field, ±2–8%) are the references. For BMR, the **Mifflin-St Jeor (1990) equation is the current gold standard**: 82% of non-obese and 70% of obese within ±10% of measured RMR (R²≈0.88–0.92); Frankenfield et al. (2005) explicitly endorse it as most reliable ([JADA 105(5):775–789](https://www.jandonline.org/article/S0002-8223(05)00149-5/abstract)). For HR-based active EE, Keytel et al. (2005) is widely used but **best-in-class only with VO2max** ([J Sports Sci 23(3):289–297](https://pubmed.ncbi.nlm.nih.gov/15966347/)); HR-reserve-based models outperform raw HR at 10–70% intensity (R²=0.80–0.89; [PMC12564861](https://pmc.ncbi.nlm.nih.gov/articles/PMC12564861/)).
+
+### What the code does & where it diverges
+- **Faithful.** A defensible two-regime split: revised Harris-Benedict / Roza & Shock (1984) BMR below the active threshold, Keytel (2005) sex-specific HR equations above it, with the active threshold at **30% HRR** (clamped HRmax=220, RHR=60 defaults). Per-second sample treatment.
+- **Diverges.** (a) Uses **Harris-Benedict (1984), not Mifflin-St Jeor (1990)** for BMR. (b) Applies the **no-VO2max Keytel variant**. (c) Uses **raw HR**, not HR-reserve weighting. (d) Applies Keytel's **steady-state aerobic** equations to every 1-second sample (violating the steady-state assumption in intervals/resistance). (e) **No population-validity guardrails** for the Keytel cohort bias (age 18–45, regularly exercising).
+
+### Reported accuracy / limits (with numbers + citations)
+- Keytel: R²=0.913 (83.3% variance) **with** VO2max, dropping to R²=0.857 (73.4%) **without** — a ~10-point penalty the code incurs; derived on 115 young, fit, 18–45 subjects, steady-state only; underestimates VO₂ in interval/non-steady-state work ([Apunts/INEFC validation](https://revista-apunts.com/en/validation-of-oxygen-consumption-prediction-equations-and-new-formulas-for-interval-training/)).
+- Harris-Benedict (1984): only **50.4% within ±10%** in overweight/obese (2024), R²=0.77 male / 0.68 female, vs Mifflin-St Jeor's 82%/70% — roughly a **32-pp accuracy gap** in non-obese ([Pavlidou et al. 2023, Metabolites 13(2):189, PMC9967803](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9967803/); [Roza & Shock 1984, AJCN 40(1):168–182]).
+- Consumer-tracker EE is poor regardless: Stanford 7-tracker study ~**31% error treadmill, ~52% cycling**, best 27% / worst 93%, "none measured EE accurately" ([Shcherbina et al. 2017](https://med.stanford.edu/news/all-news/2017/05/fitness-trackers-accurately-measure-heart-rate-but-not-calories-burned.html)); 12-device DLW study found most non-comparable to gold standard ([JMIR mHealth 7(8):e13938](https://mhealth.jmir.org/2019/8/e13938/)). Low-intensity resistance HR-EE error <10% mean but scatters widely ([PMC6705857](https://pmc.ncbi.nlm.nih.gov/articles/PMC6705857/)); flex-HR is the established alternative ([Spurr 1988]). The 30% HRR split is conservative (≈half the 60% HRR fitness threshold) and under-counts light-activity EE. Estimated current code performance: ~±20–25% MAE steady aerobic, ~±30–40% mixed/resistance, ~±10–15% resting (Harris-Benedict). [Wikipedia Harris-Benedict](https://en.wikipedia.org/wiki/Harris–Benedict_equation).
+
+### Recommendations (prioritized)
+1. **Swap BMR to Mifflin-St Jeor (1990)** — one-line change, ~32-pp accuracy gain (resting MAE ~±10–15% → ~±5–8%). Male: `10·kg + 6.25·cm − 5·age + 5`; Female: `…− 161`.
+2. **Add optional VO2max to Keytel** (fall back to no-VO2max variant when absent): variance explained 73.4% → 83.3%.
+3. **Apply HR-reserve weighting** in the active term (HRres models R²≈0.88–0.89, especially for atypical resting/max HR).
+4. **Incorporate activity type/speed** when available (INEFC walking/running equations; lower HR-EE slope or flex-HR for resistance); **document the Keytel/Harris-Benedict population limits** and warn outside age 16–75 / BMI>35. Optionally raise the active threshold toward 50% HRR or adopt flex-HR calibration.
+
+---
+
+## 5. Derived Signals: SpO2, Respiratory Rate, Skin Temperature
+
+**File:** `/Users/nasser/_dev/whoop-de-doo/my-whoop/server/ingest/app/analysis/units.py`
+
+### Gold standard / what the literature says
+- **SpO2:** The ratio-of-ratios `SpO2 = a − b·R` must be **empirically calibrated per device** against arterial co-oximetry across 70–100% saturation; constants depend on LED wavelengths, photodiode response, optical geometry, tissue site, and skin tone ([Mendelson & Ochs 1988, IEEE TBME 35(12)](https://link.springer.com/article/10.1007/BF01617892); [TI SLAA655](https://www.ti.com/lit/an/slaa655/slaa655.pdf)). Skin-tone bias is a documented equity issue ([FDA executive summary](https://www.fda.gov/media/175828/download); ISO 80601-2-61:2017).
+- **Respiratory rate:** State-of-the-art fuses three respiratory-induced PPG variations (RIIV/RIAV/RIFV) and needs **≥100 Hz** to extract RIFV from inter-beat intervals ([Charlton et al. review, PMID 29990026](https://pubmed.ncbi.nlm.nih.gov/29990026/); [Pimentel et al. 2017, PMC6051482](https://pmc.ncbi.nlm.nih.gov/articles/PMC6051482/); [instantaneous RR fusion PMC6058306](https://pmc.ncbi.nlm.nih.gov/articles/PMC6058306/)).
+- **Skin temperature:** Proper NTC thermistor conversion uses the Steinhart-Hart equation with three-point per-device calibration (±0.156 K achievable; [Ametherm](https://www.ametherm.com/thermistor/ntc-thermistors-steinhart-and-hart-equation/)); wrist temperature is heavily masked by ambient/posture ([masking factors PMC3618177](https://pmc.ncbi.nlm.nih.gov/articles/PMC3618177/)).
+
+### What the code does & where it diverges
+- **SpO2** (lines 153–225): textbook-correct R via MAD-robust AC/DC, but uses **generic TI defaults (a=110, b=25)** — not device-fitted — with **no skin-tone correction**; AC/DC>10% motion rejection is reasonable but simple. The `fit_spo2()` scaffold (lines 513–582) exists but lacks ground-truth data.
+- **Respiratory rate** (lines 388–456): Welch periodogram on a **1 Hz** signal in 0.1–0.5 Hz, 2-min window. 1 Hz is at/below Nyquist for the respiratory band, **loses RIFV entirely**, and risks aliasing; the per-sample fallback (lines 475–496) is admittedly "fully synthetic"; the neurokit2 xcorr fallback (lines 459–472) needs fs>6 Hz and will typically fail back to Welch.
+- **Skin temperature** (lines 314–365): crude **linear** map (`0.02·raw + 14.4`), uncalibrated; **deviation mode (offset-canceling) is the correct strategy** since it depends only on slope, but there is no low-pass filter, no ambient/posture correction, and no validation.
+- The LONO cross-validation harness (lines 721–781) is **correctly designed** (whole-night splits, anti-overfit rules) but unused for want of calibration data.
+
+### Reported accuracy / limits (with numbers + citations)
+- **SpO2:** Even modern calibrated wrist reflectance achieves only ~2.4% RMSE ([EmbracePlus, ISO 80601-2-61, PMC10726006](https://pmc.ncbi.nlm.nih.gov/articles/PMC10726006/)); wrist overnight hits **3.2% RMSE with 30.4% data rejection** vs 1.9% at the upper arm ([arXiv:2505.20846](https://arxiv.org/pdf/2505.20846)); sternum subject-specific 2.27% ([PMC8699050](https://pmc.ncbi.nlm.nih.gov/articles/PMC8699050/)). Skin-tone bias: Black subjects +0.6% to +5.1% (660 nm AC drops 3–4% with pigmentation, <0.2% at 940 nm), overestimating SpO2 and masking hypoxemia ([Medtronic/SPIE PMC11358849]; [Monte Carlo PMC11769505](https://pmc.ncbi.nlm.nih.gov/articles/PMC11769505/); [systematic review PMC9102088](https://pmc.ncbi.nlm.nih.gov/articles/PMC9102088/); [subject-specific PMC12694438](https://pmc.ncbi.nlm.nih.gov/articles/PMC12694438/)). **Uncalibrated defaults → expected >3–5% error**; a reported ~86.6% on healthy subjects is a red flag (channel swap / hypoxic-cohort fit / poor contact).
+- **Respiratory rate:** Best-case fusion at 100 Hz reaches **1.8 BrPM RMSE** (RIIV alone 4.1, RIAV 7.5, RIFV 4.2); signal coherence collapses from 0.80 at 64 Hz to ~0.34 at 8 Hz and is essentially unusable at 1 Hz ([Charlton fusion PMC6058306](https://pmc.ncbi.nlm.nih.gov/articles/PMC6058306/); [Pimentel PMC6051482](https://pmc.ncbi.nlm.nih.gov/articles/PMC6051482/); [sampling-rate PMC8877143](https://pmc.ncbi.nlm.nih.gov/articles/PMC8877143/); [site effects PMC6611405](https://pmc.ncbi.nlm.nih.gov/articles/PMC6611405/); [motion+accelerometry IET 10.1049/htl.2018.5019](https://digital-library.theiet.org/doi/10.1049/htl.2018.5019)). Expected at 1 Hz Welch: **≥4–6 BrPM RMSE**.
+- **Skin temperature:** Oura finger validated (lab r²>0.99, real-world ±0.36°C); **no peer-reviewed wrist (WHOOP/Fitbit/Apple) validation** exists — internal only. Circadian amplitude 0.3–0.5°C, so a ≤10% slope error yields ~0.03–0.05°C deviation error (acceptable for trend), but absolute °C is ~±0.5°C uncalibrated. Menstrual tracking at the finger: menstruation sensitivity 71.9–86.5%, ovulation 83.3%, but nadir detected in only 41% of cycles; wrist is worse ([Oura menstrual PMC6883568](https://pmc.ncbi.nlm.nih.gov/articles/PMC6883568/); [cross-cycle PMC9005074](https://pmc.ncbi.nlm.nih.gov/articles/PMC9005074/); [wrist vs BBT PMC8238491](https://pmc.ncbi.nlm.nih.gov/articles/PMC8238491/)).
+
+### Recommendations (prioritized)
+1. **Tier 1 — correctness (blocks clinical use):** Fit device-specific SpO2 (a,b) on ≥4 ground-truth nights (target 1.5–2.5% RMSE); **raise RR sampling to ≥100 Hz** or stop reporting RR as a standalone vital (acknowledge 4–6 BrPM error); validate all three against clinical references (pulse oximeter, capnograph, research thermometer) on ≥10 subjects, ≥3 nights.
+2. **Tier 2 — equity & robustness:** add a skin-tone bias term for SpO2 (interim ±1–2% per Fitzpatrick; long-term, a dark-skin cohort per ISO 80601-2-61); add signal-quality/beat-morphology motion rejection for RR; low-pass filter the temperature series and use a nightly (not global) baseline for deviation.
+3. **Tier 3 — refinement:** implement RIIV/RIAV/RIFV fusion once high-rate sampling exists; add green-channel SQI for SpO2 motion rejection; add ambient/posture correction for temperature.
+
+---
+
+## Cross-Cutting Note: What This Changes vs the Original Audit
+
+The deeper evidence **shifts three verdicts and hardens two caveats**:
+
+1. **Derived Signals (SpO2 + Respiratory Rate) — verdict should be downgraded from "implemented/plausible" to "not fit for standalone health claims."** This is the largest shift. RR at 1 Hz is **physically incapable** of state-of-the-art accuracy (RIFV is lost; coherence collapses below 16 Hz; expected ≥4–6 BrPM error vs the 1.8 BrPM achievable). SpO2 with generic uncalibrated constants carries an expected >3–5% error plus an unaddressed skin-tone equity bias that can mask hypoxemia. Both should be gated behind device calibration / higher sampling before any user-facing vital-sign presentation. Skin-temperature **deviation** survives as a usable trend signal, but absolute °C and any menstrual/illness inference should be downgraded to "indicative only" given the total absence of peer-reviewed wrist validation.
+
+2. **Calories — verdict shifts from "reasonable" to "reasonable but with a free, high-value fix outstanding."** The Harris-Benedict vs Mifflin-St Jeor gap (~32 pp within ±10%) is a documented, one-line correctness improvement; leaving it is now a known, citable deficiency rather than a defensible choice.
+
+3. **HRV — verdict moves from "faithful to standard" to "faithful in formula, unvalidated in pipeline."** The formula is correct, but the PPG-vs-ECG ~3–4 ms bias, the ECG-only Kubios validation applied to PPG, the absence of an artifact-density gate (against a +413% single-artifact sensitivity), and the lack of any LOA analysis mean the clinical-equivalence claim is unsupported. This is a caveat-hardening, not a reversal.
+
+4. **Recovery Baselines — verdict largely upheld, with one honest reframing.** The z-score/EWMA machinery is methodologically sound and individual-focused (best practice). The reframing: the **composite score itself is unvalidated industry practice** (no wearable publishes recovery-score accuracy), and the single-night/nocturnal/4-night-seed choices are responsiveness trade-offs, not accuracy wins. The Grosicki (2020) counter-evidence keeps the single-night-vs-smoothed question genuinely contested rather than settled against the code.
+
+5. **Exercise Detection — verdict upheld as the strongest of the five.** The dual-gate + HRmax-cascade design meets or exceeds standard practice. The only material change is recognizing that the threshold parameters (`MERGE_GAP_S=150`, `MIN_INTENSITY_Z2PLUS=0.50`, `0.20 g/s`) are **single-user-tuned and not criterion-validated** — a generalization risk, not a correctness defect.
+
+**Net:** the original audit's relative ranking holds — Exercise and Recovery-Baselines are the most solid, HRV is formula-correct but validation-light, Calories has a cheap material fix, and Derived Signals are the weakest. The new evidence mainly tightens the Derived-Signals downgrade to an explicit "do not present as clinical vitals" and converts the Calories BMR choice into an actionable defect.
