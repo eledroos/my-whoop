@@ -64,11 +64,19 @@ public final class BLEManager: NSObject, ObservableObject {
     // The timer fires this often, but BackfillPolicy.periodicFloorSeconds is the real floor (a recent
     // event-triggered sync defers the next periodic tick). 900s = 15 min, matching WHOOP.
     static let backfillIntervalSeconds = 900
+    /// Min seconds between server PULLs. The upload timer ticks every ~30s, but server-COMPUTED
+    /// metrics (recovery, sleep, daily) change at most a few times a day — re-pulling every tick
+    /// spammed redundant GETs (25 in 15 min while fully caught up) and competed with the offload on
+    /// the shared store during a backlog. 300s = pull at most once per 5 min.
+    static let pullMinIntervalSeconds: TimeInterval = 300
     /// Last-offload-attempt time (unix seconds), persisted so the rate limiter survives relaunch
     /// (matches WHOOP's DATA_SYNC_WORKER_LAST_WORK_TIME watermark).
     static let backfillLastAtKey = "backfillLastAt"
     /// Prevents a second backfill from starting on a same-process reconnect to the same strap.
     private var backfillStarted = false
+    /// Wall time (unix seconds) of the last server pull; throttles pullFromServer to
+    /// pullMinIntervalSeconds so the ~30s upload timer can't hammer it.
+    private var lastPullAt: TimeInterval = 0
     /// Runs the connect handshake EXACTLY ONCE per connection. `didWriteValueFor` re-fires on every
     /// `.withResponse` write (the bond write, every SEND_HISTORICAL, every HISTORY_END ack); without
     /// this guard those re-entries re-blasted hello/SET_CLOCK at the strap mid-offload and stopped it
@@ -415,6 +423,12 @@ public final class BLEManager: NSObject, ObservableObject {
     /// — a pull failure never affects the BLE connection. No-op when serverSync is nil (unconfigured).
     private func pullFromServer() {
         guard let serverSync else { return }
+        // Throttle: the upload timer calls this every ~30s, but server-computed metrics update at
+        // most a few times a day. Pull at most once per pullMinIntervalSeconds so we don't spam
+        // redundant GETs (and don't compete with the offload on the shared store during a backlog).
+        let now = Date().timeIntervalSince1970
+        guard now - lastPullAt >= BLEManager.pullMinIntervalSeconds else { return }
+        lastPullAt = now
         Task { await serverSync.pull() }
     }
 
